@@ -1,3 +1,4 @@
 opencv-python==4.12.0.88
 ipykernel==6.29.5
 pillow==11.3.0
+pytesseract==0.3.13
