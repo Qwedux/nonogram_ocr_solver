@@ -1,6 +1,11 @@
 import cv2
 import numpy as np
 import pytesseract
+import time
+import pickle
+import lzma
+
+start_time = time.time()
 
 
 # ================================================================================
@@ -124,7 +129,7 @@ print(f"Horizontal lines: {len(horizontal_lines)}")
 print(f"Vertical lines: {len(vertical_lines)}")
 
 # ================================================================================
-# DISPLAY RESULTS
+# DISPLAY LINES ON IMAGE
 # ================================================================================
 # if lines is not None:
 #     print(f"Found {len(lines)} lines")
@@ -152,7 +157,7 @@ print(f"Vertical lines: {len(vertical_lines)}")
 #     show_image(vertical_image, "Vertical Lines (Blue)")
 
 # ================================================================================
-# OCR PROCESSING
+# PROCESS THE IMAGE INTO CLUE REGIONS OF PATCHES
 # ================================================================================
 
 
@@ -191,7 +196,7 @@ def get_digit_patches(clue_region, direction="vertical"):
     return patches
 
 
-def standardize_paddings(patch):
+def standardize_paddings(patch, padding_size=0):
     """Standardizes patches such that each digit has same px padding on all sides."""
     if np.all(patch == 0):
         return patch
@@ -204,7 +209,6 @@ def standardize_paddings(patch):
     patch_cropped = patch_cropped[:, non_zero_columns]
 
     # show_image(patch_cropped, "Cropped Patch")
-    padding_size = 3
     patch_padded = np.zeros(
         (
             patch_cropped.shape[0] + 2 * padding_size,
@@ -212,9 +216,10 @@ def standardize_paddings(patch):
         ),
         dtype=patch_cropped.dtype,
     )
-    patch_padded[padding_size:-padding_size, padding_size:-padding_size] = (
-        patch_cropped
-    )
+    patch_padded[
+        padding_size : patch_padded.shape[0] - padding_size,
+        padding_size : patch_padded.shape[1] - padding_size,
+    ] = patch_cropped
 
     # print(f"Patch shape after padding: {patch_padded.shape}")
     # show_image(patch_padded, "Padded Patch")
@@ -242,7 +247,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
         y1 = horizontal_lines[i][1]
         y2 = horizontal_lines[i + 1][1]
         clue_region = binary[y1:y2, 0:grid_left]
-
         # show_image(
         #     clue_region,
         #     f"Horizontal Clue Region {i} (y1={y1}, y2={y2})",
@@ -261,7 +265,7 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
             if clue_region_patch_small.mean() > clue_region_patch_large.mean():
                 horizontal_clue_regions_patches.append(
                     {
-                        "region": clue_region_patch_small,
+                        "patch": clue_region_patch_small,
                         "type": "small",
                         "coordinates": (start, y1, end, y2),
                     }
@@ -269,12 +273,18 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
             else:
                 horizontal_clue_regions_patches.append(
                     {
-                        "region": clue_region_patch_large,
+                        "patch": clue_region_patch_large,
                         "type": "large",
                         "coordinates": (start, y1, end, y2),
                     }
                 )
 
+        for patch_data in horizontal_clue_regions_patches:
+            patch = patch_data["patch"]
+            # show_image(
+            #     patch,
+            #     f"Horizontal Clue Patch (y1={y1}, y2={y2}, start={patch_data['coordinates'][0]}, end={patch_data['coordinates'][2]})",
+            # )
         horizontal_clue_regions.append(horizontal_clue_regions_patches)
 
     # Extract vertical clue regions (above the grid, between vertical lines)
@@ -298,7 +308,7 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
             if clue_region_patch_small.mean() > clue_region_patch_large.mean():
                 vertical_clue_regions_patches.append(
                     {
-                        "region": clue_region_patch_small,
+                        "patch": clue_region_patch_small,
                         "type": "small",
                         "coordinates": (x1, start, x2, end),
                     }
@@ -306,14 +316,127 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
             else:
                 vertical_clue_regions_patches.append(
                     {
-                        "region": clue_region_patch_large,
+                        "patch": clue_region_patch_large,
                         "type": "large",
                         "coordinates": (x1, start, x2, end),
                     }
                 )
         vertical_clue_regions.append(vertical_clue_regions_patches)
 
+    for i, region in enumerate(horizontal_clue_regions):
+        is_large = False
+        for patch_data in region:
+            if is_large:
+                if patch_data["type"] == "small":
+                    raise ValueError(
+                        f"Expected large patch after large patch in horizontal clue region {i}, but found small patch."
+                    )
+                if patch_data["type"] == "large":
+                    is_large = False
+            else:
+                if patch_data["type"] == "large":
+                    is_large = True
+
     return horizontal_clue_regions, vertical_clue_regions
+
+
+def label_patches(clue_regions):
+    """Shows unlabeled patch to the user and user puts single digit label on input
+    visual representation of the path and label is saved to the labels folder
+    """
+
+    labeled_patches = {i: [] for i in range(10)}
+    for i, region in enumerate(clue_regions):
+        for j, patch_data in enumerate(region):
+            patch = patch_data["patch"]
+            patch_type = patch_data["type"]
+            coordinates = patch_data["coordinates"]
+
+            # Show the patch to the user
+            show_image(patch, f"Patch {i}.{j} (Type: {patch_type})")
+            print(f"Coordinates: {coordinates}")
+
+            # Get user input for label
+            label = input("Enter digit label (0-9): ").strip()
+            if label.isdigit() and 0 <= int(label) <= 9:
+                labeled_patches[int(label)].append(patch)
+            else:
+                print("Invalid label. Skipping this patch.")
+        
+    return labeled_patches
+
+# Extract clue regions
+print("Extracting clue regions...")
+horizontal_clue_regions, vertical_clue_regions = extract_clue_regions(
+    image, horizontal_lines, vertical_lines
+)
+print(f"Found {len(horizontal_clue_regions)} horizontal clue regions")
+print(f"Found {len(vertical_clue_regions)} vertical clue regions")
+horizontal_labeled = label_patches(horizontal_clue_regions)
+vertical_labeled = label_patches(vertical_clue_regions)
+# join the two dictionaries
+labeled_patches = {**horizontal_labeled, **vertical_labeled}
+# Save labeled patches to a file
+with lzma.open("labeled_patches.xz", "wb") as f:
+    pickle.dump(labeled_patches, f)
+
+# ================================================================================
+# OCR PART
+# ================================================================================
+def most_common_digit(text_candidates: list[str]):
+    """Find the most common digit in the text candidates."""
+    digit_counts: dict[str, int] = {}
+    for text in text_candidates:
+        for char in text:
+            if char.isdigit():
+                digit_counts[char] = digit_counts.get(char, 0) + 1
+
+    if not digit_counts:
+        return "", 0
+
+    # Find the digit with the maximum count
+    most_common_digit = max(digit_counts, key=lambda k: digit_counts[k])
+    most_common_count = digit_counts[most_common_digit]
+    return most_common_digit, most_common_count
+
+
+def random_shit_padding_ocr(patch) -> str:
+    text_candidates: list[str] = []
+    for pad_left in range(3):
+        for pad_right in range(3):
+            for pad_up in range(7):
+                for pad_down in range(7):
+                    padded_patch = np.zeros(
+                        (
+                            patch.shape[0] + pad_up + pad_down,
+                            patch.shape[1] + pad_left + pad_right,
+                        ),
+                        dtype=np.uint8,
+                    )
+                    padded_patch[
+                        pad_up : pad_up + patch.shape[0],
+                        pad_left : pad_left + patch.shape[1],
+                    ] = patch
+                    #    show_image(padded_patch, f"Padded Patch (L:{pad_left}, R:{pad_right}, U:{pad_up}, D:{pad_down})")
+                    # Perform OCR on the padded patch
+                    text = pytesseract.image_to_string(
+                        padded_patch,
+                        config="--psm 10 -c tessedit_char_whitelist=0123456789",
+                    )
+                    if text.strip():
+                        text_candidates.append(text.strip())
+                        # if there is a digit with at least 5 occurances and it has majority of candidates, return it
+                        digit, count = most_common_digit(text_candidates)
+                        if (
+                            count >= 5
+                            and text_candidates.count(digit)
+                            > len(text_candidates) // 2
+                        ):
+                            return digit
+    digit, count = most_common_digit(text_candidates)
+    if digit == "":
+        raise ValueError("No digit detected in the patch.")
+    return digit
 
 
 def perform_ocr_on_regions(clue_regions, region_type="horizontal"):
@@ -321,66 +444,41 @@ def perform_ocr_on_regions(clue_regions, region_type="horizontal"):
     results = []
 
     for i, region_data in enumerate(clue_regions):
-        region = region_data["region"]
+        results.append([])
+        for j, patch_data in enumerate(region_data):
+            patch = patch_data["patch"]
+            patch_type = patch_data["type"]
+            digit = random_shit_padding_ocr(patch)
+            # show_image(patch, f"Patch (Type: {patch_type})")
+            print(f"Detected digit for {region_type} clue {i}.{j}: {digit}")
 
-        # Skip if region is too small
-        if region.shape[0] < 10 or region.shape[1] < 10:
-            print(
-                f"Skipping {region_type} region {i}: too small ({region.shape})"
-            )
-            results.append("")
-            continue
-
-        show_image(
-            region,
-            f"{region_type.capitalize()} Clue {i} (before OCR)",
-        )
-        # Perform OCR with specific config for digits
-        custom_config = (
-            r"--oem 3 --psm 8 -c tessedit_char_whitelist=0123456789 "
-        )
-        text = pytesseract.image_to_string(region, config=custom_config).strip()
-
-        # Clean up the text (remove non-digit characters and extra spaces)
-        cleaned_text = "".join(c for c in text if c.isdigit() or c.isspace())
-        cleaned_text = " ".join(cleaned_text.split())  # Normalize whitespace
-
-        results.append(cleaned_text)
-        print(f"{region_type.capitalize()} clue {i}: '{cleaned_text}'")
-
-        # Optional: Show the processed region for debugging
-        if len(cleaned_text) > 0:  # Only show regions with detected text
-            show_image(
-                region,
-                f"{region_type.capitalize()} Clue {i}: '{cleaned_text}'",
-            )
+            if patch_type == "small":
+                results[i].append(digit)
+            elif patch_type == "large":
+                if (
+                    len(results[i]) > 0
+                    and region_data[j - 1]["type"] == "large"
+                ):
+                    results[i][-1] = results[i][-1] + digit
+                else:
+                    results[i].append(digit)
 
     return results
 
 
-# Extract clue regions
-print("Extracting clue regions...")
-horizontal_clue_regions, vertical_clue_regions = extract_clue_regions(
-    image, horizontal_lines, vertical_lines
-)
-
-print(f"Found {len(horizontal_clue_regions)} horizontal clue regions")
-print(f"Found {len(vertical_clue_regions)} vertical clue regions")
-
-# Perform OCR on horizontal clues (row clues)
 print("\nProcessing horizontal clues (row clues):")
-horizontal_clues = perform_ocr_on_regions(
-    horizontal_clue_regions[5:], "horizontal"
-)
-
-# Perform OCR on vertical clues (column clues)
+horizontal_clues = perform_ocr_on_regions(horizontal_clue_regions, "horizontal")
 print("\nProcessing vertical clues (column clues):")
 vertical_clues = perform_ocr_on_regions(vertical_clue_regions, "vertical")
 
+# ================================================================================
+# PRINT FINAL SUMMARY
+# ================================================================================
 # Display results
 print("\n" + "=" * 50)
 print("OCR RESULTS:")
 print("=" * 50)
+print(f"Total processing time: {time.time() - start_time:.2f} seconds\n")
 print("Horizontal clues (rows):")
 for i, clue in enumerate(horizontal_clues):
     print(f"  Row {i}: {clue}")
