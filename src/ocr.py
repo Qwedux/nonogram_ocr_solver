@@ -163,44 +163,19 @@ def threshold_image(gray, threshold=128):
     return binary
 
 
-# def split_region(region_image, direction="vertical"):
-#     """Splits a region along the specified direction at bars that are completely black."""
-#     regions = [[]]
-#     if direction == "horizontal":
-#         for r in range(region_image.shape[0]):
-#             row = region_image[r, :]
-#             if np.all(row == 0):
-#                 # If the row is completely black, split here
-#                 if len(regions[-1]) > 0:
-#                     regions.append([])
-#             else:
-#                 regions[-1].append(row)
-#     elif direction == "vertical":
-#         for c in range(region_image.shape[1]):
-#             column = region_image[:, c]
-#             if np.all(column == 0):
-#                 # If the column is completely black, split here
-#                 if len(regions[-1]) > 0:
-#                     regions.append([])
-#             else:
-#                 regions[-1].append(column)
-#     regions = [np.array(r) for r in regions if len(r) > 0]
-#     return regions
-
-
 def get_digit_patches(clue_region, direction="vertical"):
-    """Returns [start, end) indices of the digit patch in the clue region."""
-    """This function assumes that the clue region is a single row or column."""
+    """
+    Returns [start, end) indices of the digit patch in the clue region.
+
+    This function assumes that the clue region is a single row or column.
+    """
     if direction == "vertical":
         # For vertical clues, we look for patches in the columns
         non_zero_columns = np.any(clue_region != 0, axis=0)
     else:
         # For horizontal clues, we look for patches in the rows
         non_zero_columns = np.any(clue_region != 0, axis=1)
-
     # print(f"Non-zero columns: {non_zero_columns}")
-    if len(non_zero_columns) == 0:
-        return []
 
     # Find start and end indices of non-zero patches
     patches = []
@@ -216,6 +191,36 @@ def get_digit_patches(clue_region, direction="vertical"):
     return patches
 
 
+def standardize_paddings(patch):
+    """Standardizes patches such that each digit has same px padding on all sides."""
+    if np.all(patch == 0):
+        return patch
+
+    non_zero_columns = np.any(patch != 0, axis=0)
+    non_zero_rows = np.any(patch != 0, axis=1)
+    # show_image(patch, "Original Patch")
+
+    patch_cropped = patch[non_zero_rows, :]
+    patch_cropped = patch_cropped[:, non_zero_columns]
+
+    # show_image(patch_cropped, "Cropped Patch")
+    padding_size = 3
+    patch_padded = np.zeros(
+        (
+            patch_cropped.shape[0] + 2 * padding_size,
+            patch_cropped.shape[1] + 2 * padding_size,
+        ),
+        dtype=patch_cropped.dtype,
+    )
+    patch_padded[padding_size:-padding_size, padding_size:-padding_size] = (
+        patch_cropped
+    )
+
+    # print(f"Patch shape after padding: {patch_padded.shape}")
+    # show_image(patch_padded, "Padded Patch")
+    return patch_padded
+
+
 def extract_clue_regions(image, horizontal_lines, vertical_lines):
     """Extract clue regions from the nonogram image."""
     c_g = image[:, :, 1]
@@ -225,10 +230,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
     diff_b_g = cv2.absdiff(c_b, c_g)
     binary_small_nums = threshold_image(cv2.absdiff(diff_b_g, c_g), 120)
     binary_large_nums = threshold_image(diff_b_g, 80)
-    show_image(c_g)
-    # show_image(binary, "Binary Image")
-    # show_image(binary_small_nums, "Binary Small Numbers Image")
-    # show_image(binary_large_nums, "Binary Large Numbers Image")
 
     grid_top = horizontal_lines[0][1] if len(horizontal_lines) > 0 else 0
     grid_left = vertical_lines[0][0] if len(vertical_lines) > 0 else 0
@@ -241,18 +242,21 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
         y1 = horizontal_lines[i][1]
         y2 = horizontal_lines[i + 1][1]
         clue_region = binary[y1:y2, 0:grid_left]
-        show_image(clue_region, f"Horizontal Clue Region {i}")
 
+        # show_image(
+        #     clue_region,
+        #     f"Horizontal Clue Region {i} (y1={y1}, y2={y2})",
+        # )
         patches = get_digit_patches(clue_region, direction="vertical")
         horizontal_clue_regions_patches = []
-        for j, patch in enumerate(patches):
+        for _, patch in enumerate(patches):
             start, end = patch
-            # show_image(
-            #     binary[y1:y2, start:end],
-            #     f"Horizontal Clue Patch {i} ({start}, {end})",
-            # )
-            clue_region_patch_small = binary_small_nums[y1:y2, start:end]
-            clue_region_patch_large = binary_large_nums[y1:y2, start:end]
+            clue_region_patch_small = standardize_paddings(
+                binary_small_nums[y1:y2, start:end]
+            )
+            clue_region_patch_large = standardize_paddings(
+                binary_large_nums[y1:y2, start:end]
+            )
 
             if clue_region_patch_small.mean() > clue_region_patch_large.mean():
                 horizontal_clue_regions_patches.append(
@@ -262,7 +266,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
                         "coordinates": (start, y1, end, y2),
                     }
                 )
-                show_image(clue_region_patch_small, f"Horizontal Clue Region {i} Small Patch {j} ({start}, {end})")
             else:
                 horizontal_clue_regions_patches.append(
                     {
@@ -271,7 +274,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
                         "coordinates": (start, y1, end, y2),
                     }
                 )
-                show_image(clue_region_patch_large, f"Horizontal Clue Region {i} Large Patch {j} ({start}, {end})")
 
         horizontal_clue_regions.append(horizontal_clue_regions_patches)
 
@@ -282,17 +284,16 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
         x2 = vertical_lines[i + 1][0]
 
         clue_region = binary[0:grid_top, x1:x2]
-        show_image(clue_region, f"Vertical Clue Region {i}")
         patches = get_digit_patches(clue_region, direction="horizontal")
         vertical_clue_regions_patches = []
-        for j, patch in enumerate(patches):
+        for _, patch in enumerate(patches):
             start, end = patch
-            # show_image(
-            #     binary[start:end, x1:x2],
-            #     f"Vertical Clue Patch {i} ({start}, {end})",
-            # )
-            clue_region_patch_small = binary_small_nums[start:end, x1:x2]
-            clue_region_patch_large = binary_large_nums[start:end, x1:x2]
+            clue_region_patch_small = standardize_paddings(
+                binary_small_nums[start:end, x1:x2]
+            )
+            clue_region_patch_large = standardize_paddings(
+                binary_large_nums[start:end, x1:x2]
+            )
 
             if clue_region_patch_small.mean() > clue_region_patch_large.mean():
                 vertical_clue_regions_patches.append(
@@ -311,7 +312,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
                     }
                 )
         vertical_clue_regions.append(vertical_clue_regions_patches)
-    
 
     return horizontal_clue_regions, vertical_clue_regions
 
@@ -366,12 +366,6 @@ horizontal_clue_regions, vertical_clue_regions = extract_clue_regions(
 
 print(f"Found {len(horizontal_clue_regions)} horizontal clue regions")
 print(f"Found {len(vertical_clue_regions)} vertical clue regions")
-
-# for region in horizontal_clue_regions:
-#     show_image(region["region"], f"Horizontal Clue {region['row_index']}")
-
-# for region in vertical_clue_regions:
-#     show_image(region["region"], f"Vertical Clue {region['col_index']}")
 
 # Perform OCR on horizontal clues (row clues)
 print("\nProcessing horizontal clues (row clues):")
