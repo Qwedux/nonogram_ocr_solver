@@ -438,46 +438,59 @@ def most_common_digit(text_candidates: list[str]):
     return most_common_digit, most_common_count
 
 
+def similarity_score(a: NDArray[np.uint8], b: NDArray[np.uint8]) -> float:
+    if a.shape != b.shape:
+        return 0.0
+    return (
+        np.sum(a == b) / a.size
+    )  # Calculate the percentage of matching pixels
+
+
+def compute_similarity_2d(a: NDArray[np.uint8], b: NDArray[np.uint8]) -> float:
+    """Compute similarity between two 2D arrays."""
+    h_a, w_a = a.shape
+    h_b, w_b = b.shape
+
+    # print(f"Comparing shapes: a={a.shape}, b={b.shape}")
+    if h_b < h_a:
+        diff = h_a - h_b + 3
+        tmp_b = np.zeros((h_b + 2 * (diff), w_b), dtype=np.uint8)
+        tmp_b[diff : h_b + diff, :] = b
+        b = tmp_b
+        h_b = b.shape[0]
+    if w_b < w_a:
+        diff = w_a - w_b + 3
+        tmp_b = np.zeros((h_b, w_b + 2 * (diff)), dtype=np.uint8)
+        tmp_b[:, diff : w_b + diff] = b
+        b = tmp_b
+        w_b = b.shape[1]
+
+    scores = []
+    for i in range(h_b - h_a + 1):
+        for j in range(w_b - w_a + 1):
+            sub_b = b[i : i + h_a, j : j + w_a]
+            scores.append(similarity_score(a, sub_b))
+
+    if scores:
+        return max(scores)
+
+    return 0.0
+
+
 def random_shit_padding_ocr(
     patch,
     example_labels: dict[int, list[NDArray[np.uint8]]] = {},
 ) -> str:
-    
-    text_candidates: list[str] = []
-    for pad_left in range(3):
-        for pad_right in range(3):
-            for pad_up in range(7):
-                for pad_down in range(7):
-                    padded_patch = np.zeros(
-                        (
-                            patch.shape[0] + pad_up + pad_down,
-                            patch.shape[1] + pad_left + pad_right,
-                        ),
-                        dtype=np.uint8,
-                    )
-                    padded_patch[
-                        pad_up : pad_up + patch.shape[0],
-                        pad_left : pad_left + patch.shape[1],
-                    ] = patch
-                    #    show_image(padded_patch, f"Padded Patch (L:{pad_left}, R:{pad_right}, U:{pad_up}, D:{pad_down})")
-                    # Perform OCR on the padded patch
-                    text = pytesseract.image_to_string(
-                        padded_patch,
-                        config="--psm 10 -c tessedit_char_whitelist=0123456789",
-                    )
-                    if text.strip():
-                        text_candidates.append(text.strip())
-                        # if there is a digit with at least 5 occurances and it has majority of candidates, return it
-                        digit, count = most_common_digit(text_candidates)
-                        if (
-                            count >= 5
-                            and text_candidates.count(digit)
-                            > len(text_candidates) // 2
-                        ):
-                            return digit
-    digit, count = most_common_digit(text_candidates)
-    if digit == "":
-        raise ValueError("No digit detected in the patch.")
+
+    similarity_scores = {str(i): 0.0 for i in range(10)}
+    for candidate_digit in range(10):
+        # we must compare the given patch to the example
+        # patch example_labels[candidate_digit][0]. The issue is that
+        # these two patches can have different shape.
+        score = compute_similarity_2d(patch, example_labels[candidate_digit][0])
+        similarity_scores[str(candidate_digit)] += score
+
+    digit = max(similarity_scores, key=lambda k: similarity_scores[k])
     return digit
 
 
@@ -515,9 +528,13 @@ def perform_ocr_on_regions(
 
 
 print("\nProcessing horizontal clues (row clues):")
-horizontal_clues = perform_ocr_on_regions(horizontal_clue_regions, "horizontal", labeled_patches)
+horizontal_clues = perform_ocr_on_regions(
+    horizontal_clue_regions, "horizontal", labeled_patches
+)
 print("\nProcessing vertical clues (column clues):")
-vertical_clues = perform_ocr_on_regions(vertical_clue_regions, "vertical", labeled_patches)
+vertical_clues = perform_ocr_on_regions(
+    vertical_clue_regions, "vertical", labeled_patches
+)
 
 # ================================================================================
 # PRINT FINAL SUMMARY
@@ -533,7 +550,7 @@ for i, clue in enumerate(horizontal_clues):
 
 print("\nVertical clues (columns):")
 for i, clue in enumerate(vertical_clues):
-    print(f"  Col {i}: {clue}")
+    print(f"Col {i}: {clue}")
 
 # Save results to a file
 with open("nonogram_clues.txt", "w") as f:
