@@ -43,7 +43,7 @@ def load_and_crop_image(image_path: str) -> NDArray[np.uint8]:
 
 
 image = load_and_crop_image(
-    "../images/Screenshot_20250720_131146_Nonogram_galaxy.png"
+    "../images/Screenshot_20250722_144239_Nonogram_galaxy.png"
 )
 print(f"Image shape after cropping: {image.shape}")
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -394,7 +394,7 @@ def label_patches(
         pickle.dump(labeled_patches, f)
 
 
-label_patches(horizontal_clue_regions + vertical_clue_regions)
+# label_patches(horizontal_clue_regions + vertical_clue_regions)
 
 
 def load_labeled_patches(
@@ -552,15 +552,19 @@ print("\nVertical clues (columns):")
 for i, clue in enumerate(vertical_clues):
     print(f"Col {i}: {clue}")
 
+def format_clue(clue: list[str]) -> str:
+    return " ".join(str(int(x)) for x in clue)
+
+
 # Save results to a file
 with open("nonogram_clues.txt", "w") as f:
     f.write("Nonogram Clues\n")
     f.write("=" * 20 + "\n\n")
-    f.write("Horizontal clues (rows):\n")
-    for i, clue in enumerate(horizontal_clues):
-        f.write(f"Row {i}: {clue}\n")
     f.write("\nVertical clues (columns):\n")
     for i, clue in enumerate(vertical_clues):
-        f.write(f"Col {i}: {clue}\n")
+        f.write(f"{format_clue(clue)}\n")
+    f.write("Horizontal clues (rows):\n")
+    for i, clue in enumerate(horizontal_clues):
+        f.write(f"{format_clue(clue)}\n")
 
 print(f"\nResults saved to 'nonogram_clues.txt'")
