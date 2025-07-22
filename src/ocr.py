@@ -1,9 +1,12 @@
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 import pytesseract
 import time
 import pickle
 import lzma
+from labels import target_labels
+from typing import Any
 
 start_time = time.time()
 
@@ -25,15 +28,23 @@ def show_image(image: cv2.typing.MatLike, title: str = "Image"):
     cv2.destroyAllWindows()
 
 
-image = np.array(
-    cv2.imread("../images/Screenshot_20250720_131146_Nonogram_galaxy.png")
+def load_and_crop_image(image_path: str) -> NDArray[np.uint8]:
+    image = np.array(
+        cv2.imread(image_path),
+        dtype=np.uint8,
+    )
+    crops_vertical = [300, 900]
+    crops_horizontal = [0, 0]
+    image = image[
+        crops_vertical[0] : image.shape[0] - crops_vertical[1],
+        crops_horizontal[0] : image.shape[1] - crops_horizontal[1],
+    ]
+    return image
+
+
+image = load_and_crop_image(
+    "../images/Screenshot_20250720_131146_Nonogram_galaxy.png"
 )
-crops_vertical = [300, 900]
-crops_horizontal = [0, 0]
-image = image[
-    crops_vertical[0] : image.shape[0] - crops_vertical[1],
-    crops_horizontal[0] : image.shape[1] - crops_horizontal[1],
-]
 print(f"Image shape after cropping: {image.shape}")
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
@@ -43,51 +54,44 @@ gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 low_threshold = 100
 high_threshold = 150
 edges = cv2.Canny(gray, low_threshold, high_threshold)
-lines = cv2.HoughLinesP(
+lines: NDArray[np.int32] = cv2.HoughLinesP(
     edges,
     rho=1,
     theta=np.pi / 180,
     threshold=100,
     minLineLength=100,
     maxLineGap=10,
-)
-lines = np.squeeze(lines) if lines is not None else None
-assert lines is not None, "No lines detected. Check image and parameters!"
+).astype(np.int32)
+lines = np.squeeze(lines)
+assert (
+    lines.ndim == 2 and lines.shape[1] == 4
+), "Lines should be a 2D array with shape (N, 4)"
 
 # ================================================================================
 # SEPARATE HORIZONTAL AND VERTICAL LINES
 # ================================================================================
 
-horizontal_lines = []
-vertical_lines = []
-for index in range(len(lines)):
-    line = lines[index]
-    assert line.shape == (4,), "Each line must have shape (4,)"
-    x1, y1, x2, y2 = map(int, list(line))
 
-    assert (
-        isinstance(x1, int)
-        and isinstance(y1, int)
-        and isinstance(x2, int)
-        and isinstance(y2, int)
-    ), "Line coordinates must be integers"
-    if x1 > x2:
-        x1, x2 = x2, x1  # Ensure x1 is always less than x2
-    if y1 > y2:
-        y1, y2 = y2, y1  # Ensure y1 is always less than y2
-    line = np.array([x1, y1, x2, y2])  # Convert to a 2D array for consistency
+def separate_line_types(
+    lines: NDArray[np.int32],
+) -> tuple[list[NDArray[np.int32]], list[NDArray[np.int32]]]:
+    """Separate lines into horizontal and vertical based on their angles."""
+    horizontal_lines = []
+    vertical_lines = []
+    for line in lines:
+        x1, y1, x2, y2 = line
+        if x1 > x2:
+            x1, x2 = x2, x1  # Ensure x1 is always less than x2
+        if y1 > y2:
+            y1, y2 = y2, y1  # Ensure y1 is always less than y2
+        line = np.array([x1, y1, x2, y2], dtype=np.int32)
 
-    # Calculate angle to determine if line is horizontal or vertical
-    angle = np.arctan2(y2 - y1, x2 - x1) * 180 / np.pi
-
-    # Lines within 10 degrees of horizontal (0 or 180 degrees)
-    if abs(angle) < 10 or abs(angle - 180) < 10:
-        horizontal_lines.append(line)
-    # Lines within 10 degrees of vertical (90 or -90 degrees)
-    elif abs(angle - 90) < 10 or abs(angle + 90) < 10:
-        vertical_lines.append(line)
-horizontal_lines = np.array(horizontal_lines)
-vertical_lines = np.array(vertical_lines)
+        angle = np.arctan2(y2 - y1, x2 - x1) * 180.0 / np.pi
+        if abs(angle) < 10 or abs(angle - 180) < 10:  # Horizontal line
+            horizontal_lines.append(line)
+        elif abs(angle - 90) < 10 or abs(angle + 90) < 10:  # Vertical line
+            vertical_lines.append(line)
+    return horizontal_lines, vertical_lines
 
 
 def line_length(line):
@@ -96,9 +100,11 @@ def line_length(line):
     return np.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
 
 
-def filter_lines(lines, min_distance, by_index=0):
+def filter_lines(
+    lines: list[NDArray[np.int32]], min_distance: int, by_index: int = 0
+) -> NDArray[np.int32]:
     """Filters horizontal lines if index is 1 and vertical lines if index is 0."""
-    filtered_lines = []
+    filtered_lines: list[NDArray[np.int32]] = []
     last_position = (
         -min_distance * 2
     )  # Initialize to a negative value to allow the first line
@@ -111,15 +117,13 @@ def filter_lines(lines, min_distance, by_index=0):
             # if the new line is longer, than replace the last one
             if line_length(line) > line_length(filtered_lines[-1]):
                 filtered_lines[-1] = line
-    filtered_lines = np.array(filtered_lines)
-    start_position = np.mean(filtered_lines[5:-5], axis=0, dtype=int)
-    filtered_lines[:, 1 - by_index] = 0  # start_position[1-by_index]
-    filtered_lines[:, 3 - by_index] = image.shape[
-        by_index
-    ]  # start_position[3-by_index]
-    return filtered_lines
+    filtered_lines_array = np.array(filtered_lines)
+    filtered_lines_array[:, 1 - by_index] = 0
+    filtered_lines_array[:, 3 - by_index] = image.shape[by_index]
+    return filtered_lines_array
 
 
+horizontal_lines, vertical_lines = separate_line_types(lines)
 horizontal_lines = sorted(horizontal_lines, key=lambda x: x[1])  # Sort by y1
 vertical_lines = sorted(vertical_lines, key=lambda x: x[0])  # Sort by x1
 horizontal_lines = filter_lines(horizontal_lines, min_distance=10, by_index=1)
@@ -164,11 +168,11 @@ print(f"Vertical lines: {len(vertical_lines)}")
 def threshold_image(gray, threshold=128):
     """Convert an image to binary using a fixed threshold."""
     _, binary = cv2.threshold(gray, threshold, 255, cv2.THRESH_BINARY)
-    binary = np.array(binary)
+    binary = np.array(binary).astype(np.uint8)
     return binary
 
 
-def get_digit_patches(clue_region, direction="vertical"):
+def get_digit_patches(clue_region: NDArray[np.uint8], direction="vertical"):
     """
     Returns [start, end) indices of the digit patch in the clue region.
 
@@ -183,7 +187,7 @@ def get_digit_patches(clue_region, direction="vertical"):
     # print(f"Non-zero columns: {non_zero_columns}")
 
     # Find start and end indices of non-zero patches
-    patches = []
+    patches: list[tuple[int, int]] = []
     start = -1
     for i in range(len(non_zero_columns)):
         if non_zero_columns[i]:
@@ -196,7 +200,7 @@ def get_digit_patches(clue_region, direction="vertical"):
     return patches
 
 
-def standardize_paddings(patch, padding_size=0):
+def standardize_paddings(patch: NDArray[np.uint8], padding_size=0):
     """Standardizes patches such that each digit has same px padding on all sides."""
     if np.all(patch == 0):
         return patch
@@ -209,7 +213,7 @@ def standardize_paddings(patch, padding_size=0):
     patch_cropped = patch_cropped[:, non_zero_columns]
 
     # show_image(patch_cropped, "Cropped Patch")
-    patch_padded = np.zeros(
+    patch_padded: NDArray[np.uint8] = np.zeros(
         (
             patch_cropped.shape[0] + 2 * padding_size,
             patch_cropped.shape[1] + 2 * padding_size,
@@ -226,26 +230,32 @@ def standardize_paddings(patch, padding_size=0):
     return patch_padded
 
 
-def extract_clue_regions(image, horizontal_lines, vertical_lines):
+def extract_clue_regions(
+    image: NDArray[np.uint8],
+    horizontal_lines: NDArray[np.int32],
+    vertical_lines: NDArray[np.int32],
+):
     """Extract clue regions from the nonogram image."""
     c_g = image[:, :, 1]
     c_b = image[:, :, 0]
 
     binary = threshold_image(c_g, 120)
-    diff_b_g = cv2.absdiff(c_b, c_g)
+    diff_b_g = cv2.absdiff(c_b, c_g).astype(np.uint8)
     binary_small_nums = threshold_image(cv2.absdiff(diff_b_g, c_g), 120)
     binary_large_nums = threshold_image(diff_b_g, 80)
 
-    grid_top = horizontal_lines[0][1] if len(horizontal_lines) > 0 else 0
-    grid_left = vertical_lines[0][0] if len(vertical_lines) > 0 else 0
+    grid_top: np.int32 = horizontal_lines[0][1]
+    grid_left: np.int32 = vertical_lines[0][0]
 
     print(f"Grid boundaries: top={grid_top}, left={grid_left}")
 
     # Extract horizontal clue regions (left of the grid, between horizontal lines)
-    horizontal_clue_regions = []
+    horizontal_clue_regions: list[
+        list[dict[str, str | tuple[int, int, int, int] | NDArray[np.uint8]]]
+    ] = []
     for i in range(len(horizontal_lines) - 1):
-        y1 = horizontal_lines[i][1]
-        y2 = horizontal_lines[i + 1][1]
+        y1 = int(horizontal_lines[i][1])
+        y2 = int(horizontal_lines[i + 1][1])
         clue_region = binary[y1:y2, 0:grid_left]
         # show_image(
         #     clue_region,
@@ -288,10 +298,12 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
         horizontal_clue_regions.append(horizontal_clue_regions_patches)
 
     # Extract vertical clue regions (above the grid, between vertical lines)
-    vertical_clue_regions = []
+    vertical_clue_regions: list[
+        list[dict[str, str | tuple[int, int, int, int] | NDArray[np.uint8]]]
+    ] = []
     for i in range(len(vertical_lines) - 1):
-        x1 = vertical_lines[i][0]
-        x2 = vertical_lines[i + 1][0]
+        x1 = int(vertical_lines[i][0])
+        x2 = int(vertical_lines[i + 1][0])
 
         clue_region = binary[0:grid_top, x1:x2]
         patches = get_digit_patches(clue_region, direction="horizontal")
@@ -340,31 +352,6 @@ def extract_clue_regions(image, horizontal_lines, vertical_lines):
     return horizontal_clue_regions, vertical_clue_regions
 
 
-def label_patches(clue_regions):
-    """Shows unlabeled patch to the user and user puts single digit label on input
-    visual representation of the path and label is saved to the labels folder
-    """
-
-    labeled_patches = {i: [] for i in range(10)}
-    for i, region in enumerate(clue_regions):
-        for j, patch_data in enumerate(region):
-            patch = patch_data["patch"]
-            patch_type = patch_data["type"]
-            coordinates = patch_data["coordinates"]
-
-            # Show the patch to the user
-            show_image(patch, f"Patch {i}.{j} (Type: {patch_type})")
-            print(f"Coordinates: {coordinates}")
-
-            # Get user input for label
-            label = input("Enter digit label (0-9): ").strip()
-            if label.isdigit() and 0 <= int(label) <= 9:
-                labeled_patches[int(label)].append(patch)
-            else:
-                print("Invalid label. Skipping this patch.")
-        
-    return labeled_patches
-
 # Extract clue regions
 print("Extracting clue regions...")
 horizontal_clue_regions, vertical_clue_regions = extract_clue_regions(
@@ -372,13 +359,64 @@ horizontal_clue_regions, vertical_clue_regions = extract_clue_regions(
 )
 print(f"Found {len(horizontal_clue_regions)} horizontal clue regions")
 print(f"Found {len(vertical_clue_regions)} vertical clue regions")
-horizontal_labeled = label_patches(horizontal_clue_regions)
-vertical_labeled = label_patches(vertical_clue_regions)
-# join the two dictionaries
-labeled_patches = {**horizontal_labeled, **vertical_labeled}
-# Save labeled patches to a file
-with lzma.open("labeled_patches.xz", "wb") as f:
-    pickle.dump(labeled_patches, f)
+
+# ================================================================================
+# PATCH LABELING
+# ================================================================================
+
+
+def label_patches(
+    clue_regions: list[
+        list[dict[str, str | tuple[int, int, int, int] | NDArray[np.uint8]]]
+    ],
+):
+    """Shows unlabeled patch to the user and user puts single digit label on input
+    visual representation of the path and label is saved to the labels folder
+    """
+
+    labeled_patches: dict[int, list[NDArray[np.uint8]]] = {
+        i: [] for i in range(10)
+    }
+    for i, region in enumerate(clue_regions):
+        for j, patch_data in enumerate(region):
+            patch = patch_data["patch"]
+            assert isinstance(
+                patch, np.ndarray
+            ), "Patch should be a numpy array"
+            label = target_labels[i][j]
+            # show_image(patch, f"Patch {i}.{j} (Label: {label})")
+
+            labeled_patches[label].append(patch)
+    for digit, patches in labeled_patches.items():
+        print(f"Digit {digit}: {len(patches)} patches")
+    # Save labeled patches to a file
+    with lzma.open("labeled_patches.xz", "wb") as f:
+        pickle.dump(labeled_patches, f)
+
+
+label_patches(horizontal_clue_regions + vertical_clue_regions)
+
+
+def load_labeled_patches(
+    filename="labeled_patches.xz",
+) -> dict[int, list[NDArray[np.uint8]]]:
+    """Load labeled patches from a file."""
+    try:
+        with lzma.open(filename, "rb") as f:
+            labeled_patches = pickle.load(f)
+        print(f"Loaded {len(labeled_patches)} labeled patches from {filename}")
+        return labeled_patches
+    except FileNotFoundError:
+        print(f"File {filename} not found. Returning empty dictionary.")
+        return {}
+    except Exception as e:
+        print(f"Error loading labeled patches: {e}")
+        return {}
+
+
+labeled_patches = load_labeled_patches()
+print(f"Loaded labeled patches: {len(labeled_patches)} digits found.")
+
 
 # ================================================================================
 # OCR PART
@@ -400,7 +438,11 @@ def most_common_digit(text_candidates: list[str]):
     return most_common_digit, most_common_count
 
 
-def random_shit_padding_ocr(patch) -> str:
+def random_shit_padding_ocr(
+    patch,
+    example_labels: dict[int, list[NDArray[np.uint8]]] = {},
+) -> str:
+    
     text_candidates: list[str] = []
     for pad_left in range(3):
         for pad_right in range(3):
@@ -439,7 +481,11 @@ def random_shit_padding_ocr(patch) -> str:
     return digit
 
 
-def perform_ocr_on_regions(clue_regions, region_type="horizontal"):
+def perform_ocr_on_regions(
+    clue_regions,
+    region_type="horizontal",
+    example_labels: dict[int, list[NDArray[np.uint8]]] = {},
+):
     """Perform OCR on clue regions and return extracted text."""
     results = []
 
@@ -448,7 +494,9 @@ def perform_ocr_on_regions(clue_regions, region_type="horizontal"):
         for j, patch_data in enumerate(region_data):
             patch = patch_data["patch"]
             patch_type = patch_data["type"]
-            digit = random_shit_padding_ocr(patch)
+            digit = random_shit_padding_ocr(
+                patch, example_labels=example_labels
+            )
             # show_image(patch, f"Patch (Type: {patch_type})")
             print(f"Detected digit for {region_type} clue {i}.{j}: {digit}")
 
@@ -467,9 +515,9 @@ def perform_ocr_on_regions(clue_regions, region_type="horizontal"):
 
 
 print("\nProcessing horizontal clues (row clues):")
-horizontal_clues = perform_ocr_on_regions(horizontal_clue_regions, "horizontal")
+horizontal_clues = perform_ocr_on_regions(horizontal_clue_regions, "horizontal", labeled_patches)
 print("\nProcessing vertical clues (column clues):")
-vertical_clues = perform_ocr_on_regions(vertical_clue_regions, "vertical")
+vertical_clues = perform_ocr_on_regions(vertical_clue_regions, "vertical", labeled_patches)
 
 # ================================================================================
 # PRINT FINAL SUMMARY
